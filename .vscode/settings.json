@@ -1,4 +1,4 @@
 {
   "workbench.colorTheme": "Red",
-  "window.title": "Tools | ${activeEditorShort}"
+  "window.title": "Tools: ${activeEditorShort}"
 }
