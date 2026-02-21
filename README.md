@@ -32,6 +32,28 @@ This repo includes `.github/workflows/discord-repo-updates.yml`, which posts upd
 - `pull_request` (`opened`, `reopened`, `synchronize`, `closed`)
 - manual run via `workflow_dispatch`
 
+### Reusable installer for new repos
+
+Use `bin/install-discord-repo-updates` to install the same workflow into any git repo:
+
+```bash
+./bin/install-discord-repo-updates --repo /path/to/target-repo
+```
+
+Use a different emoji if needed:
+
+```bash
+./bin/install-discord-repo-updates --repo /path/to/target-repo --emoji "⚙️"
+```
+
+The installer writes:
+- `.github/workflows/discord-repo-updates.yml`
+- `docs/discord-repo-updates-setup.md`
+
+Template sources live in:
+- `templates/discord-repo-updates/.github/workflows/discord-repo-updates.yml`
+- `templates/discord-repo-updates/docs/discord-repo-updates-setup.md`
+
 ### Discord setup
 
 1. In your Discord server, open `Server Settings` -> `Integrations` -> `Webhooks`.
@@ -44,7 +66,7 @@ This repo includes `.github/workflows/discord-repo-updates.yml`, which posts upd
 2. Add repository secret:
    - `DISCORD_REPO_UPDATES_WEBHOOK_URL` = the webhook URL from Discord.
 
-The workflow currently uses a fixed Unicode emoji (`🚧`) in the commit message template.
+The workflow uses Unicode emoji in the commit message template (`🛠️` by default via the installer).
 
 ### Test it
 

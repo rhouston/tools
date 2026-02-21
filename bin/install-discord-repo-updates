@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: install-discord-repo-updates [--repo PATH] [--emoji EMOJI] [--force] [--no-docs]
+
+Install the Discord repo updates workflow into a target git repository.
+
+Options:
+  --repo PATH     Target repository path (default: current directory).
+  --emoji EMOJI   Unicode emoji prefix for commit notifications (default: 🛠️).
+  --force         Overwrite existing installed files.
+  --no-docs       Do not copy docs/discord-repo-updates-setup.md to the target repo.
+  --help          Show this help message.
+USAGE
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE_ROOT="$SCRIPT_DIR/../templates/discord-repo-updates"
+WORKFLOW_TEMPLATE="$TEMPLATE_ROOT/.github/workflows/discord-repo-updates.yml"
+DOC_TEMPLATE="$TEMPLATE_ROOT/docs/discord-repo-updates-setup.md"
+
+TARGET_REPO="$(pwd)"
+EMOJI="🛠️"
+FORCE=0
+COPY_DOCS=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)
+      [[ $# -ge 2 ]] || { echo "Missing value for --repo." >&2; exit 1; }
+      TARGET_REPO="$2"
+      shift 2
+      ;;
+    --emoji)
+      [[ $# -ge 2 ]] || { echo "Missing value for --emoji." >&2; exit 1; }
+      EMOJI="$2"
+      shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --no-docs)
+      COPY_DOCS=0
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ ! -d "$TARGET_REPO" ]]; then
+  echo "Repo path does not exist: $TARGET_REPO" >&2
+  exit 1
+fi
+TARGET_REPO="$(cd "$TARGET_REPO" && pwd)"
+
+if ! git -C "$TARGET_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Target path is not a git repository: $TARGET_REPO" >&2
+  exit 1
+fi
+
+if [[ ! -r "$WORKFLOW_TEMPLATE" ]]; then
+  echo "Workflow template not found: $WORKFLOW_TEMPLATE" >&2
+  exit 1
+fi
+if (( COPY_DOCS == 1 )) && [[ ! -r "$DOC_TEMPLATE" ]]; then
+  echo "Doc template not found: $DOC_TEMPLATE" >&2
+  exit 1
+fi
+
+WORKFLOW_DEST="$TARGET_REPO/.github/workflows/discord-repo-updates.yml"
+DOC_DEST="$TARGET_REPO/docs/discord-repo-updates-setup.md"
+
+if (( FORCE == 0 )) && [[ -e "$WORKFLOW_DEST" ]]; then
+  echo "Refusing to overwrite existing workflow: $WORKFLOW_DEST" >&2
+  echo "Use --force to overwrite." >&2
+  exit 1
+fi
+if (( COPY_DOCS == 1 )) && (( FORCE == 0 )) && [[ -e "$DOC_DEST" ]]; then
+  echo "Refusing to overwrite existing doc: $DOC_DEST" >&2
+  echo "Use --force to overwrite, or --no-docs to skip doc install." >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$WORKFLOW_DEST")"
+emoji_escaped="${EMOJI//\\/\\\\}"
+emoji_escaped="${emoji_escaped//&/\\&}"
+emoji_escaped="${emoji_escaped//|/\\|}"
+sed "s|__DISCORD_COMMIT_EMOJI__|$emoji_escaped|g" "$WORKFLOW_TEMPLATE" > "$WORKFLOW_DEST"
+
+if (( COPY_DOCS == 1 )); then
+  mkdir -p "$(dirname "$DOC_DEST")"
+  sed "s|__DISCORD_COMMIT_EMOJI__|$emoji_escaped|g" "$DOC_TEMPLATE" > "$DOC_DEST"
+fi
+
+echo "Installed Discord repo updates workflow into: $TARGET_REPO"
+echo "  - $WORKFLOW_DEST"
+if (( COPY_DOCS == 1 )); then
+  echo "  - $DOC_DEST"
+fi
+echo
+echo "Next steps in target repo:"
+echo "1) Add GitHub secret: DISCORD_REPO_UPDATES_WEBHOOK_URL"
+echo "2) Commit and push:"
+if (( COPY_DOCS == 1 )); then
+  echo "   git add .github/workflows/discord-repo-updates.yml docs/discord-repo-updates-setup.md"
+else
+  echo "   git add .github/workflows/discord-repo-updates.yml"
+fi
+echo "   git commit -m \"Add Discord repo updates workflow\""
+echo "   git push"
+echo "3) In GitHub Actions, run workflow 'Discord Repo Updates' (workflow_dispatch) to test."
