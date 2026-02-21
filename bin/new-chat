@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v code >/dev/null 2>&1; then
-  echo "VS Code CLI 'code' was not found in PATH." >&2
-  exit 1
-fi
-
 usage() {
   cat <<'USAGE'
 Usage: new-chat [--repo NAME_OR_PATH | --scratch] [--shared-instance]
@@ -50,6 +45,49 @@ extract_setting() {
   ' "$file"
 }
 
+cli_supports_option() {
+  local option="$1"
+  local help_text="$2"
+  [[ "$help_text" == *"$option"* ]]
+}
+
+add_code_candidate() {
+  local target_name="$1"
+  local -n candidates_ref="$target_name"
+  local candidate="$2"
+  local existing
+  for existing in "${candidates_ref[@]}"; do
+    if [[ "$existing" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  candidates_ref+=("$candidate")
+}
+
+discover_code_candidates() {
+  local target_name="$1"
+  local -n candidates_ref="$target_name"
+
+  if [[ -n "${NEW_CHAT_CODE_BIN:-}" ]]; then
+    add_code_candidate "$target_name" "$NEW_CHAT_CODE_BIN"
+    return 0
+  fi
+
+  if [[ -x "/mnt/c/Program Files/Microsoft VS Code/bin/code" ]]; then
+    add_code_candidate "$target_name" "/mnt/c/Program Files/Microsoft VS Code/bin/code"
+  fi
+  if [[ -x "/mnt/c/Program Files/Microsoft VS Code Insiders/bin/code-insiders" ]]; then
+    add_code_candidate "$target_name" "/mnt/c/Program Files/Microsoft VS Code Insiders/bin/code-insiders"
+  fi
+
+  if command -v code >/dev/null 2>&1; then
+    add_code_candidate "$target_name" "$(command -v code)"
+  fi
+  if command -v code-insiders >/dev/null 2>&1; then
+    add_code_candidate "$target_name" "$(command -v code-insiders)"
+  fi
+}
+
 REPOS_ROOT="$(resolve_existing_dir "$HOME/library/repositories" "$HOME/Library/repositories")" || {
   echo "Could not find repositories root. Expected ~/library/repositories or ~/Library/repositories." >&2
   exit 1
@@ -69,7 +107,7 @@ if [[ -z "$SETTINGS_TEMPLATE" ]]; then
 fi
 
 color_theme="Default Dark+"
-window_title='CODEX | ${rootName} - ${activeEditorShort}'
+window_title='CODEX | ${folderName}${separator}${activeEditorShort}'
 if [[ -n "$SETTINGS_TEMPLATE" && -r "$SETTINGS_TEMPLATE" ]]; then
   parsed_theme="$(extract_setting "$SETTINGS_TEMPLATE" "workbench.colorTheme" || true)"
   parsed_title="$(extract_setting "$SETTINGS_TEMPLATE" "window.title" || true)"
@@ -155,6 +193,18 @@ if [[ -z "$target_dir" ]]; then
   fi
 fi
 
+repo_settings_file="$target_dir/.vscode/settings.json"
+if [[ -r "$repo_settings_file" ]]; then
+  repo_theme="$(extract_setting "$repo_settings_file" "workbench.colorTheme" || true)"
+  repo_title="$(extract_setting "$repo_settings_file" "window.title" || true)"
+  if [[ -n "${repo_theme:-}" ]]; then
+    color_theme="$repo_theme"
+  fi
+  if [[ -n "${repo_title:-}" ]]; then
+    window_title="$repo_title"
+  fi
+fi
+
 SESSION_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/new-chat"
 if ! mkdir -p "$SESSION_ROOT/sessions" >/dev/null 2>&1; then
   SESSION_ROOT="/tmp/new-chat-${USER:-user}"
@@ -162,14 +212,34 @@ if ! mkdir -p "$SESSION_ROOT/sessions" >/dev/null 2>&1; then
 fi
 find "$SESSION_ROOT/sessions" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + >/dev/null 2>&1 || true
 
-SESSION_DIR="$(mktemp -d "$SESSION_ROOT/sessions/session-XXXXXX")"
-WORKSPACE_FILE="$SESSION_DIR/new-chat.code-workspace"
-target_dir_json="$(json_escape "$target_dir")"
-color_theme_json="$(json_escape "$color_theme")"
-window_title_json="$(json_escape "$window_title")"
+if ! SESSION_DIR="$(mktemp -d "$SESSION_ROOT/sessions/session-XXXXXX" 2>/dev/null)"; then
+  SESSION_ROOT="/tmp/new-chat-${USER:-user}"
+  mkdir -p "$SESSION_ROOT/sessions"
+  SESSION_DIR="$(mktemp -d "$SESSION_ROOT/sessions/session-XXXXXX")"
+fi
+launch_target="$target_dir"
+use_workspace_file=0
 
-cat >"$WORKSPACE_FILE" <<WORKSPACE
+# Prefer opening the folder directly so repo .vscode/settings.json applies and Explorer
+# shows the repo root at top level. Opt into workspace wrapper when explicitly requested.
+if [[ -n "${NEW_CHAT_SETTINGS_FILE:-}" || "${NEW_CHAT_FORCE_WORKSPACE:-0}" == "1" ]]; then
+  use_workspace_file=1
+fi
+
+if (( use_workspace_file == 1 )); then
+  WORKSPACE_FILE="$SESSION_DIR/new-chat.code-workspace"
+  workspace_name="$(basename "$target_dir")"
+  if [[ -z "$workspace_name" || "$workspace_name" == "/" || "$workspace_name" == "." ]]; then
+    workspace_name="Workspace"
+  fi
+  target_dir_json="$(json_escape "$target_dir")"
+  workspace_name_json="$(json_escape "$workspace_name")"
+  color_theme_json="$(json_escape "$color_theme")"
+  window_title_json="$(json_escape "$window_title")"
+
+  cat >"$WORKSPACE_FILE" <<WORKSPACE
 {
+  "name": "$workspace_name_json",
   "folders": [
     {
       "path": "$target_dir_json"
@@ -181,12 +251,55 @@ cat >"$WORKSPACE_FILE" <<WORKSPACE
   }
 }
 WORKSPACE
+  launch_target="$WORKSPACE_FILE"
+fi
+
+code_candidates=()
+discover_code_candidates code_candidates
+
+if (( ${#code_candidates[@]} == 0 )); then
+  echo "Could not find a VS Code CLI launcher. Set NEW_CHAT_CODE_BIN if needed." >&2
+  exit 1
+fi
+
+selected_code_bin=""
+supports_user_data_dir=0
+for candidate in "${code_candidates[@]}"; do
+  if candidate_help="$("$candidate" --help 2>&1)"; then
+    candidate_supports_user_data_dir=0
+    if cli_supports_option "--user-data-dir" "$candidate_help"; then
+      candidate_supports_user_data_dir=1
+    fi
+
+    if [[ -z "$selected_code_bin" ]]; then
+      selected_code_bin="$candidate"
+      supports_user_data_dir="$candidate_supports_user_data_dir"
+    fi
+
+    if (( use_isolated_instance == 1 && candidate_supports_user_data_dir == 1 )); then
+      selected_code_bin="$candidate"
+      supports_user_data_dir=1
+      break
+    fi
+  fi
+done
+
+if [[ -z "$selected_code_bin" ]]; then
+  echo "None of the detected VS Code launchers worked in this environment." >&2
+  exit 1
+fi
 
 if (( use_isolated_instance == 1 )); then
-  mkdir -p "$SESSION_DIR/user-data"
-  env -u VSCODE_IPC_HOOK_CLI -u VSCODE_CWD -u TERM_PROGRAM \
-    code --new-window --user-data-dir "$SESSION_DIR/user-data" "$WORKSPACE_FILE"
+  if (( supports_user_data_dir == 1 )); then
+    mkdir -p "$SESSION_DIR/user-data"
+    env -u VSCODE_IPC_HOOK_CLI -u VSCODE_CWD -u TERM_PROGRAM \
+      "$selected_code_bin" --new-window --user-data-dir "$SESSION_DIR/user-data" "$launch_target"
+  else
+    echo "new-chat: selected launcher does not support --user-data-dir; launching shared instance." >&2
+    env -u VSCODE_IPC_HOOK_CLI -u VSCODE_CWD -u TERM_PROGRAM \
+      "$selected_code_bin" --new-window "$launch_target"
+  fi
 else
   env -u VSCODE_IPC_HOOK_CLI -u VSCODE_CWD -u TERM_PROGRAM \
-    code --new-window "$WORKSPACE_FILE"
+    "$selected_code_bin" --new-window "$launch_target"
 fi
