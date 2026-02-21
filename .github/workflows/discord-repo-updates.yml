@@ -63,8 +63,8 @@ jobs:
               short_id = head_full[:7] if head_full else "unknown"
               compare_url = event.get("compare", f"{server}/{repo}/commits")
               lines = [
-                  f"Commit: 🛠️ - {repo_name} - {pusher} - {branch} - {short_id} - {head_msg}",
-                  f"Compare: <{compare_url}>",
+                  f"🛠️ Commit: [{repo_name}] {pusher} - {branch} - {short_id} - {head_msg}",
+                  f"<{compare_url}>",
               ]
           elif event_name == "pull_request":
               action = event.get("action", "updated")
