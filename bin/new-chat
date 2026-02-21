@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v code >/dev/null 2>&1; then
+  echo "VS Code CLI 'code' was not found in PATH." >&2
+  exit 1
+fi
+
+usage() {
+  cat <<'USAGE'
+Usage: new-chat [--repo NAME_OR_PATH | --scratch] [--shared-instance]
+
+Options:
+  --repo NAME_OR_PATH  Open a repo by name from ~/library/repositories or by full path.
+  --scratch            Open a neutral folder (~/library or ~/Library).
+  --shared-instance    Reuse the normal VS Code user-data dir (disables per-window isolation).
+  --help               Show this help message.
+USAGE
+}
+
+resolve_existing_dir() {
+  local dir
+  for dir in "$@"; do
+    if [[ -d "$dir" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  printf '%s' "$s"
+}
+
+extract_setting() {
+  local file="$1"
+  local key="$2"
+  awk -v key="\"$key\"" '
+    index($0, key) {
+      sub(/^[^:]*:[[:space:]]*"/, "", $0)
+      sub(/"[[:space:]]*,?[[:space:]]*$/, "", $0)
+      print
+      exit
+    }
+  ' "$file"
+}
+
+REPOS_ROOT="$(resolve_existing_dir "$HOME/library/repositories" "$HOME/Library/repositories")" || {
+  echo "Could not find repositories root. Expected ~/library/repositories or ~/Library/repositories." >&2
+  exit 1
+}
+SCRATCH_ROOT="$(resolve_existing_dir "$HOME/library" "$HOME/Library" "$HOME")"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_SETTINGS_TEMPLATE="$SCRIPT_DIR/../config/new-chat-settings.json"
+
+SETTINGS_TEMPLATE="${NEW_CHAT_SETTINGS_FILE:-}"
+if [[ -z "$SETTINGS_TEMPLATE" ]]; then
+  if [[ -r "$DEFAULT_SETTINGS_TEMPLATE" ]]; then
+    SETTINGS_TEMPLATE="$DEFAULT_SETTINGS_TEMPLATE"
+  elif template_dir="$(resolve_existing_dir "$HOME/library/repositories/codex/.vscode" "$HOME/Library/repositories/codex/.vscode")"; then
+    SETTINGS_TEMPLATE="$template_dir/settings.json"
+  fi
+fi
+
+color_theme="Default Dark+"
+window_title='CODEX | ${rootName} - ${activeEditorShort}'
+if [[ -n "$SETTINGS_TEMPLATE" && -r "$SETTINGS_TEMPLATE" ]]; then
+  parsed_theme="$(extract_setting "$SETTINGS_TEMPLATE" "workbench.colorTheme" || true)"
+  parsed_title="$(extract_setting "$SETTINGS_TEMPLATE" "window.title" || true)"
+  if [[ -n "${parsed_theme:-}" ]]; then
+    color_theme="$parsed_theme"
+  fi
+  if [[ -n "${parsed_title:-}" ]]; then
+    window_title="$parsed_title"
+  fi
+fi
+
+target_dir=""
+use_isolated_instance=1
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)
+      [[ $# -ge 2 ]] || { echo "Missing value for --repo." >&2; exit 1; }
+      repo_arg="$2"
+      shift 2
+      if [[ -d "$repo_arg" ]]; then
+        target_dir="$(cd "$repo_arg" && pwd)"
+      elif [[ -d "$REPOS_ROOT/$repo_arg" ]]; then
+        target_dir="$(cd "$REPOS_ROOT/$repo_arg" && pwd)"
+      else
+        echo "Repo not found: $repo_arg" >&2
+        exit 1
+      fi
+      ;;
+    --scratch)
+      target_dir="$SCRATCH_ROOT"
+      shift
+      ;;
+    --shared-instance)
+      use_isolated_instance=0
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$target_dir" ]]; then
+  if [[ ! -t 0 ]]; then
+    target_dir="$SCRATCH_ROOT"
+  fi
+fi
+
+if [[ -z "$target_dir" ]]; then
+  mapfile -t repo_names < <(find "$REPOS_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -f)
+
+  echo "Select target for new VS Code window:"
+  echo "  [0] Scratch ($SCRATCH_ROOT)"
+  idx=1
+  for repo_name in "${repo_names[@]}"; do
+    echo "  [$idx] $repo_name"
+    ((idx++))
+  done
+
+  read -rp "Choice [0]: " choice
+  choice="${choice:-0}"
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+    echo "Invalid choice: $choice" >&2
+    exit 1
+  fi
+
+  if (( choice == 0 )); then
+    target_dir="$SCRATCH_ROOT"
+  elif (( choice > 0 && choice <= ${#repo_names[@]} )); then
+    selected_repo="${repo_names[choice-1]}"
+    target_dir="$REPOS_ROOT/$selected_repo"
+  else
+    echo "Choice out of range: $choice" >&2
+    exit 1
+  fi
+fi
+
+SESSION_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/new-chat"
+if ! mkdir -p "$SESSION_ROOT/sessions" >/dev/null 2>&1; then
+  SESSION_ROOT="/tmp/new-chat-${USER:-user}"
+  mkdir -p "$SESSION_ROOT/sessions"
+fi
+find "$SESSION_ROOT/sessions" -mindepth 1 -maxdepth 1 -type d -mtime +7 -exec rm -rf {} + >/dev/null 2>&1 || true
+
+SESSION_DIR="$(mktemp -d "$SESSION_ROOT/sessions/session-XXXXXX")"
+WORKSPACE_FILE="$SESSION_DIR/new-chat.code-workspace"
+target_dir_json="$(json_escape "$target_dir")"
+color_theme_json="$(json_escape "$color_theme")"
+window_title_json="$(json_escape "$window_title")"
+
+cat >"$WORKSPACE_FILE" <<WORKSPACE
+{
+  "folders": [
+    {
+      "path": "$target_dir_json"
+    }
+  ],
+  "settings": {
+    "workbench.colorTheme": "$color_theme_json",
+    "window.title": "$window_title_json"
+  }
+}
+WORKSPACE
+
+if (( use_isolated_instance == 1 )); then
+  mkdir -p "$SESSION_DIR/user-data"
+  env -u VSCODE_IPC_HOOK_CLI -u VSCODE_CWD -u TERM_PROGRAM \
+    code --new-window --user-data-dir "$SESSION_DIR/user-data" "$WORKSPACE_FILE"
+else
+  env -u VSCODE_IPC_HOOK_CLI -u VSCODE_CWD -u TERM_PROGRAM \
+    code --new-window "$WORKSPACE_FILE"
+fi
